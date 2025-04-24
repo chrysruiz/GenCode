@@ -1,0 +1,5 @@
+gradio
+google-generativeai
+pandas
+scikit-learn
+transformers
