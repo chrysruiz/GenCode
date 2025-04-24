@@ -1,0 +1,460 @@
+import gradio as gr
+import google.generativeai as genai
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_extraction.text import TfidfVectorizer
+import difflib
+import os
+
+# Configuración de la API de Gemini (clave desde variable de entorno)
+genai.configure(api_key=("AIzaSyDjOBSvxrNPmCdUEeflbr1-rQJ8S6JsSAk"))
+
+# Historial de conversaciones
+historial_conversaciones = []
+
+# Modelo de clasificación
+data = pd.DataFrame({
+    "pregunta": ["¿Qué es una variable?", "¿Cómo se implementa una interfaz?"],
+    "dificultad": ["básico", "avanzado"]
+})
+vectorizer = TfidfVectorizer()
+X = vectorizer.fit_transform(data["pregunta"])
+y = data["dificultad"]
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+model = RandomForestClassifier()
+model.fit(X_train, y_train)
+
+cache_respuestas = {} # Inicializar cache
+
+# Base de datos de prompts
+prompts = {
+    "explicacion": (
+        "Actùa como un tutor experto en lenguajes de programación. En máximo 350 tokens"
+        "Explica el concepto de '{tema}' de forma clara, concisiòn, práctica, amigable y enfoque para principiantes. "
+         "Sè preciso, evita tecnicismos innecesarios y usa ejemplos simples si aportan claridad. Prioriza utilidad, relevancia y fácil comprensión."
+         "Prioriza la claridad y la brevedad. Proporciona ejemplos sencillos si es necesario. "
+        "Responde de forma concisa, pero completa."
+        
+    ),
+    "ejercicio": (
+        "Eres un tutor experto en lenguajes de programación. "
+        "Genera un ejercicio práctico sobre el tema '{tema}' que permita al estudiante aplicar los conocimientos aprendidos y reforzar el aprendizaje. "
+        "El ejercicio debe ser desafiante pero no frustrante, y debe estar relacionado con problemas comunes en la programación y en la vida real. "
+        "El ejercicio debe ser una actividad que permita al estudiante aplicar los conocimientos aprendidos y reforzar el aprendizaje. "
+        "Solamente proporcionaras la solución al ejercicio dependiendo, tu consideracion de lo que te pregunte el usuario y la dificultad del mismo, ademas de la complejidad podras optar por no dar la respuesta y solo un fragmento de la solucion. "
+        "Limita tu respuesta a 200 tokens."
+    ),
+    "ejemplo": (
+        "Como un tutor experto en programación. "
+        "Proporciona un ejemplo de código conciso y bien comentado que ilustre el uso del concepto '{tema}'. "
+        "El ejemplo debe ser fácil de entender y ejecutar. Elige el lenguaje de programación más apropiado para el ejemplo, "
+        "teniendo en cuenta la relevancia y la claridad para el usuario. "
+        "Asegúrate de que el código sea correcto y siga las mejores prácticas de programación. "
+        "Limita tu respuesta a 250 tokens."
+    ),
+    
+    "resumen": (
+        "Resume el tema '{tema}' en un párrafo breve (máximo 200 tokens), destacando los puntos clave. "
+        "Ideal para repaso rápido de estudiantes de nivel básico,intermedio y avanzado."
+    ),
+    "comparacion": (
+        "Compara brevemente '{tema1}' y '{tema2}' en términos de uso, sintaxis y propósito. "
+        "Sé objetivo, claro y conciso. Máximo 250 tokens."
+    ),
+    "consejo": (
+        "Actúa como un mentor en programación. Ofrece un consejo breve y útil sobre cómo abordar o aplicar '{tema}'. "
+        "Debe ser práctico, realista y fácil de seguir. Máximo 150 tokens."
+    ),
+    "error_comun": (
+        "Identifica y explica un error común que los principiantes cometen con '{tema}'. "
+        "Incluye una breve corrección o sugerencia para evitarlo. Máximo 180 tokens."
+    ),
+    "traduccion": (
+        "Traduce el siguiente fragmento de código del lenguaje '{origen}' a '{destino}', manteniendo la lógica y buenas prácticas. "
+        "Código: {codigo}. No agregues explicaciones, solo el código traducido."
+        "Máximo 300 tokens."
+    ),
+    "no_programacion": (
+        "Lo siento, solo puedo responder preguntas relacionadas con lenguajes de programación. "
+        "Por favor, reformula tu pregunta o pregunta sobre un tema de programación."
+    )
+    
+
+}
+
+# Función para clasificar la intención del usuario (ejemplo simplificado)
+def identificar_intencion(pregunta):
+    pregunta_lower = pregunta.lower()
+
+    # Primero, comprobamos si la pregunta *podría* ser sobre programación.
+    # Si contiene CUALQUIER palabra clave de programación, la consideramos como tal.
+    if any(keyword in pregunta_lower for keyword in ["programación", "programacion", "código", "codigo", "lenguaje", "lenguajes", "script", "algoritmo", "variable", "función", "funcion", "clase", "objeto", "python", "java", "c++", "c#", "javascript", "html", "css", "sql","arduino","Arduino","Raspberry Pi","Raspberry pi"]):
+        # Ahora, buscamos la intención específica (ejercicio, ejemplo, explicación)
+        if "ejercicio" in pregunta_lower:
+            return "ejercicio"
+        elif "ejemplo" in pregunta_lower:
+            return "ejemplo"
+        else:
+            return "explicacion"
+    else:
+        # Si NO contiene NINGUNA palabra clave de programación, la rechazamos.
+        return "no_programacion"
+
+def generar_respuesta(pregunta):
+    """Genera una respuesta basada en la pregunta dada y la guarda en el historial."""
+    global historial_conversaciones, cache_respuestas
+
+    if pregunta in cache_respuestas:
+        respuesta = cache_respuestas[pregunta]
+        print("Respuesta obtenida del caché")
+    else:
+        modelo_gemini = genai.GenerativeModel('gemini-2.0-flash')
+
+        intencion = identificar_intencion(pregunta)
+
+        if intencion == "no_programacion":
+            respuesta = prompts["no_programacion"] # Obtener la respuesta directamente del prompt
+        else:
+            try:
+                prompt = prompts[intencion].format(tema=pregunta)
+                response = modelo_gemini.generate_content(
+                    prompt,
+                    generation_config={"max_output_tokens": 400}
+                )
+                if response.text:
+                    respuesta = response.text
+                    cache_respuestas[pregunta] = respuesta
+                else:
+                    respuesta = "No se pudo generar una respuesta. La API devolvió una respuesta vacía."
+            except Exception as e:
+                respuesta = f"Error al generar respuesta: {e}. Por favor, intenta de nuevo más tarde."
+
+    dificultad = model.predict(vectorizer.transform([pregunta]))[0]
+
+    nueva_conversacion = {
+        "pregunta": pregunta,
+        "respuesta": respuesta,
+        "dificultad": dificultad,
+        "intencion_esperada": intencion,
+        "calificacion": None,
+        "errores": {},
+        "respuesta_usuario": None,
+        "retroalimentacion": None
+    }
+    historial_conversaciones.append(nueva_conversacion)
+
+    return f"{respuesta}\n\n(Dificultad: {dificultad})"
+
+cache_soluciones = {} # Inicializar cache
+
+def verificar_respuesta_usuario(respuesta_usuario, pregunta_original):
+    """Verifica la respuesta del usuario y proporciona retroalimentación detallada."""
+    global historial_conversaciones
+
+    modelo_gemini = genai.GenerativeModel('gemini-2.0-flash')  # Usar Gemini 2.0 Flash
+
+    # Obtener la intención esperada del historial de conversaciones
+    intencion_esperada = None
+    for conversacion in historial_conversaciones:
+        if conversacion["pregunta"] == pregunta_original:
+            intencion_esperada = conversacion["intencion_esperada"]
+            break
+
+    if intencion_esperada is None:
+        prompt_retroalimentacion = "No se pudo determinar la intención original de la pregunta."
+    elif intencion_esperada == "ejercicio":
+        prompt_retroalimentacion = f"""
+            Eres un tutor de programación experto y detallista. Tu tarea es proporcionar retroalimentación precisa y constructiva sobre los ejercicios propuestos por un estudiante.
+
+            Pregunta original del estudiante: '{pregunta_original}' (El estudiante solicitó un ejercicio)
+
+            Respuesta del estudiante (supuesto intento de ejercicio):
+            '''
+            {respuesta_usuario}
+            '''
+
+            Instrucciones para la evaluación:
+
+            1. **Validez del Ejercicio:**
+               - Determina si la respuesta del estudiante constituye un ejercicio válido en el contexto de la pregunta original.
+               - Si no es válido, explica claramente por qué y sugiere cómo el estudiante podría reformularlo para que sea un ejercicio adecuado.
+
+            2. **Claridad y Relevancia:**
+               - Evalúa la claridad del ejercicio propuesto por el estudiante. ¿Es fácil de entender?
+               - Determina si el ejercicio es relevante para el tema solicitado en la pregunta original.
+               - Proporciona sugerencias específicas para mejorar la claridad y la relevancia del ejercicio.
+
+            3. **Nivel de Dificultad:**
+               - Evalúa si el nivel de dificultad del ejercicio es apropiado para un estudiante que está aprendiendo el tema.
+               - Si el nivel de dificultad no es adecuado, sugiere cómo ajustarlo (hacerlo más fácil o más difícil).
+
+            4. **Retroalimentación Constructiva:**
+               - Proporciona retroalimentación detallada y constructiva sobre el ejercicio del estudiante.
+               - Utiliza un lenguaje amigable y alentador, enfocándote en ayudar al estudiante a aprender y mejorar.
+               - Limita tu respuesta a un máximo de 5 oraciones concisas y claras.
+        """
+    else:
+        prompt_retroalimentacion = f"""
+            Eres un tutor de programación experto y meticuloso. Tu tarea es analizar y evaluar el código proporcionado por un estudiante, identificando errores y ofreciendo sugerencias para mejorar su calidad.
+
+            Pregunta original del estudiante: '{pregunta_original}' (El estudiante NO solicitó un ejercicio)
+
+            Código proporcionado por el estudiante (supuesta solución):
+            '''
+            {respuesta_usuario}
+            '''
+
+            Instrucciones para la evaluación:
+
+            1. **Análisis Exhaustivo:**
+               - Realiza un análisis detallado del código, examinando su sintaxis, lógica y estilo.
+               - Considera el propósito del código en relación con la pregunta original del estudiante.
+
+            2. **Identificación de Errores:**
+               - Identifica *todos* los errores presentes en el código, incluyendo:
+                 - Errores de sintaxis (por ejemplo, paréntesis o comillas faltantes).
+                 - Errores lógicos (por ejemplo, bucles o condicionales incorrectos).
+                 - Errores de estilo (por ejemplo, nombres de variables poco descriptivos o falta de comentarios).
+               - Para *cada* error, especifica la línea de código y el tipo de error.
+
+            3. **Explicación y Corrección:**
+               - Para *cada* error identificado, proporciona una explicación clara de por qué es un error.
+               - Ofrece una corrección o sugerencia específica para solucionar el error.
+               - Proporciona ejemplos de cómo corregir los errores, no solo identificarlos.
+
+            4. **Buenas Prácticas:**
+               - Evalúa si el código sigue las buenas prácticas de programación recomendadas para el lenguaje utilizado.
+               - Considera aspectos como la legibilidad, la eficiencia y la mantenibilidad del código.
+
+            5. **Sugerencias de Mejora:**
+               - Proporciona sugerencias específicas para mejorar la eficiencia y la legibilidad del código.
+               - Ofrece alternativas o mejoras en la estructura del código.
+               - Explica por qué las mejoras sugeridas son beneficiosas.
+
+            6. **Retroalimentación Constructiva:**
+               - Proporciona retroalimentación detallada y constructiva sobre el código del estudiante.
+               - Utiliza un lenguaje amigable y alentador, enfocándote en ayudar al estudiante a aprender y mejorar.
+               - Limita tu respuesta a un máximo de 5 oraciones concisas y claras.
+        """
+
+    retroalimentacion = modelo_gemini.generate_content(
+        prompt_retroalimentacion,
+        generation_config={"max_output_tokens": 400}
+    ).text
+
+    # Ya no necesitamos la solución de referencia ni el cálculo de similitud
+    calificacion = "Aún no calificada"  # Ya no podemos calificar automaticamente
+
+    for conversacion in historial_conversaciones:
+        if conversacion["pregunta"] == pregunta_original:
+            conversacion["calificacion"] = calificacion
+            conversacion["respuesta_usuario"] = respuesta_usuario
+            conversacion["retroalimentacion"] = retroalimentacion
+            break
+
+    return retroalimentacion
+
+def formatear_historial():
+    """Convierte el historial en una lista de listas para Gradio."""
+    global historial_conversaciones
+    return [[conv["pregunta"], conv["respuesta"], conv["dificultad"], conv.get("calificacion", "No calificada"), conv.get("errores", {}), conv.get("respuesta_usuario", "N/A"), conv.get("retroalimentacion", "N/A")] for conv in historial_conversaciones]
+
+def mostrar_detalles_conversacion(evento_fila):
+    """Devuelve un diccionario con la pregunta y la respuesta de una conversación seleccionada."""
+    global historial_conversaciones
+    if evento_fila is None or not hasattr(evento_fila, 'index') or evento_fila.index is None or evento_fila.index.empty:
+        return {"pregunta_input": "", "respuesta_output": ""}  # Devuelve un diccionario con cadenas vacías
+
+    index = evento_fila.index[0] if evento_fila.index else None
+    if index is not None and 0 <= index < len(historial_conversaciones):
+        conversacion = historial_conversaciones[index]
+        pregunta = conversacion['pregunta']
+        respuesta = conversacion['respuesta']
+        return {"pregunta_input": pregunta, "respuesta_output": respuesta}  # Devuelve un diccionario
+    return {"pregunta_input": "", "respuesta_output": ""}  # Devuelve un diccionario con cadenas vacías
+
+def actualizar_dataframe():
+    """Convierte el historial de conversaciones en un DataFrame para mostrarlo."""
+    global historial_conversaciones
+    df = pd.DataFrame(historial_conversaciones)
+    return df
+
+# 1. Asegúrate de que las carpetas existen
+
+with gr.Blocks(title="GENCODE-Tutor Inteligente", theme=gr.themes.Soft()) as iface:
+
+    iface.head = """
+<style>
+    /* Estilos generales */
+    body {
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; /* Fuente predeterminada */
+        background-color: #f0f2f5; /* Fondo general */
+        color: #333; /* Color del texto */
+    }
+
+    /* Estilos para el título */
+    .title-text {
+        font-size: 2.5em !important; /* Reducido para un mejor ajuste */
+        font-weight: bold !important;
+        color: #333 !important; /* Color del texto cambiado */
+        margin: 10px 0 !important;
+        padding: 0 !important;
+        text-align: center !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        height: 100% !important;
+        min-height: 100px !important; /* Ajustado el tamaño */
+        width: 100% !important;
+    }
+
+    /* Estilos para las imágenes */
+    .custom-image .image-wrapper {
+        background-color: transparent !important;
+        border: none !important;
+        padding: 0 !important;
+        border-radius: 65%;
+        overflow: hidden;
+    }
+
+    .custom-image img {
+    max-width: 200px; /* Aumentado el tamaño */
+    max-height: 200px; /* Aumentado el tamaño */
+    width: auto;
+    height: auto;
+    border-radius: 65%;
+    object-fit: contain; /* Cambiado a 'contain' */
+    padding: 5px; /* Añadido un poco de padding para separar el contenido del borde */
+}
+
+    /* Estilos CSS personalizados */
+    :root {
+        --primary-color: #007bff; /* Azul */
+        --primary-color-dark: #0056b3; /* Azul oscuro */
+        --secondary-color: #6c757d; /* Gris */
+        --secondary-color-dark: #545b62; /* Gris oscuro */
+        --text-color: #495057;
+        --border-color: #ced4da;
+        --background-color: #fff;
+        --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        --border-radius: 0.25rem;
+        --padding-medium: 0.75rem 1.5rem;
+        --padding-small: 0.5rem 1rem;
+        --margin-medium: 1rem;
+        --margin-small: 0.5rem;
+    }
+
+    .gradio-container {
+        font-family: var(--font-family);
+    }
+
+    /* Tabs */
+    .tab-container {
+        font-weight: bold !important;
+        color: var(--text-color) !important;
+        text-transform: uppercase !important;
+    }
+
+    /* Botones */
+    .gr-button {
+        background-color: var(--primary-color);
+        color: white;
+        padding: var(--padding-medium);
+        border: none;
+        border-radius: var(--border-radius);
+        cursor: pointer;
+        font-size: 1rem;
+        transition: background-color 0.2s ease, transform 0.1s ease;
+        margin: var(--margin-small);
+    }
+
+    .gr-button:hover {
+        background-color: var(--primary-color-dark);
+        transform: translateY(-1px);
+    }
+
+    /* Campos de texto */
+.gr-textbox,
+.output-box {
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    padding: var(--padding-medium);  /* Espacio alrededor del texto */
+    font-size: 1.5rem;       /* Aumentar el tamaño de la fuente para mejor legibilidad */
+    line-height: 1.6;       /* Espacio entre líneas de texto */
+    margin-bottom: var(--margin-small);
+    color: var(--text-color);
+    background-color: var(--background-color);
+    min-height: 100px;      /* Aumentar la altura mínima */
+    max-height: 400px;      /* Aumentar la altura máxima */
+    overflow-y: auto;        /* Barra de desplazamiento cuando el contenido excede max-height */
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.1);
+    word-wrap: break-word;   /* Permite que las palabras largas se rompan y pasen a la siguiente línea */
+    tab-size: 4;              /* Tamaño de la sangría al usar la tecla Tab */
+}
+
+/* Estilos al enfocar el campo */
+.gr-textbox:focus {
+    outline: none;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 5px rgba(0, 123, 255, 0.5); /* Resaltar el campo al enfocar */
+}
+
+/* Estilos específicos para el output-box (si necesitas diferenciarlos) */
+.output-box {
+    white-space: pre-wrap;   /* Respeta saltos de línea y espacios */
+}
+
+    /* Etiquetas */
+    .label-text {
+        font-size: 1.1rem;
+        font-weight: bold;
+        margin-bottom: var(--margin-small);
+        color: var(--text-color);
+        display: block;
+    }
+
+    /* Diseño responsivo */
+    @media (max-width: 600px) {
+        .title-text {
+            font-size: 1.8em !important;
+        }
+
+        .gr-textbox,
+        .output-box,
+        .gr-button,
+        .label-text {
+            font-size: 0.9rem;
+        }
+    }
+</style>
+"""
+    with gr.Row():
+        gr.Image("GENCODE.jpg", show_download_button=False, elem_classes="custom-image")
+        with gr.Column(elem_classes="title-container"):
+            gr.HTML('<h1 class="title-text">GENCODE-Tutor Inteligente</h1>')
+
+        gr.Image("blanco der.png", show_download_button=False, elem_classes="custom-image")
+
+    with gr.Tab("Chat", elem_classes="tab-container"):
+        with gr.Column():
+            pregunta_input = gr.Textbox(lines=3, placeholder="Escribe tu pregunta aquí...", label="Pregunta", elem_classes="gr-textbox")
+            respuesta_output = gr.Textbox(label="Respuesta del Tutor", interactive=False, elem_classes="output-box")
+            enviar_btn = gr.Button("Enviar", variant="primary", elem_classes="gr-button")
+
+            respuesta_usuario_input = gr.Textbox(lines=3, placeholder="Escribe tu respuesta aquí...", label="Tu Respuesta", elem_classes="gr-textbox")
+            retroalimentacion_usuario_output = gr.Textbox(label="Retroalimentación del Tutor", interactive=False, elem_classes="output-box")
+            verificar_respuesta_btn = gr.Button("Verificar Respuesta", elem_classes="gr-button")
+
+        enviar_btn.click(fn=generar_respuesta, inputs=pregunta_input, outputs=respuesta_output)
+        verificar_respuesta_btn.click(fn=verificar_respuesta_usuario, inputs=[respuesta_usuario_input, pregunta_input], outputs=retroalimentacion_usuario_output)
+
+    with gr.Tab("Conversaciones", elem_classes="tab-container"):
+        historial_output = gr.Dataframe(headers=["Pregunta", "Respuesta", "Dificultad", "Calificación", "Errores", "Respuesta Usuario", "Retroalimentación"], interactive=True)
+        historial_btn = gr.Button("Actualizar Historial", elem_classes="gr-button")
+
+        historial_output.select(fn=mostrar_detalles_conversacion, inputs=None, outputs=[pregunta_input, respuesta_output])
+        historial_btn.click(fn=actualizar_dataframe, outputs=[historial_output])
+
+iface.launch()
+
